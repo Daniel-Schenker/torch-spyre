@@ -129,3 +129,9 @@ def lt_decomp(
     out_le = torch.le(input, other).to(dtype=torch.float16)
     out_ne = torch.ne(input, other).to(dtype=torch.float16)
     return torch.mul(out_le, out_ne, out=out).to(dtype=torch.bool)
+
+@register_decomposition([torch.ops.aten.logical_not])
+def logical_not(input: torch.Tensor) -> torch.Tensor:
+    zero = torch.zeros_like(input)
+    return torch.eq(input, zero)
+
