@@ -131,7 +131,7 @@ def lt_decomp(
     return torch.mul(out_le, out_ne, out=out).to(dtype=torch.bool)
 
 @register_decomposition([torch.ops.aten.logical_not])
-def logical_not(input: torch.Tensor) -> torch.Tensor:
-    zero = torch.zeros_like(input)
+def logical_not_decomp(input: torch.Tensor) -> torch.Tensor:
+    zero = torch.zeros_like(input) # zeros_like is currently cpu fallback, this causes issues in tests
     return torch.eq(input, zero)
 
