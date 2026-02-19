@@ -132,6 +132,8 @@ def lt_decomp(
 
 @register_decomposition([torch.ops.aten.logical_not])
 def logical_not_decomp(input: torch.Tensor) -> torch.Tensor:
-    zero = torch.zeros_like(input) # zeros_like is currently cpu fallback, this causes issues in tests
+    # Zeros_like calls torch.full which is currently cpu fallback
+    # This causes issues in tests that use fake device propagation
+    zero = torch.zeros_like(input)
     return torch.eq(input, zero)
 
