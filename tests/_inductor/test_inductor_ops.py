@@ -1039,5 +1039,6 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
 
         _ = output.cpu()
 
+
 if __name__ == "__main__":
     unittest.main()
