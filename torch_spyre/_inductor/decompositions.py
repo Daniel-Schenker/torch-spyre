@@ -321,7 +321,7 @@ def lt_decomp(
     out_ne = torch.ne(input, other).to(dtype=torch.float16)
     return torch.mul(out_le, out_ne, out=out).to(dtype=torch.bool)
 
-@register_decomposition([torch.ops.aten.logical_not])
+@register_spyre_decomposition([torch.ops.aten.logical_not])
 def logical_not_decomp(input: torch.Tensor) -> torch.Tensor:
     # Zeros_like calls torch.full which is currently cpu fallback
     # This causes issues in tests that use fake device propagation
