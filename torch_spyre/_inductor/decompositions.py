@@ -323,8 +323,11 @@ def lt_decomp(
 
 @register_spyre_decomposition([torch.ops.aten.logical_not])
 def logical_not_decomp(input: torch.Tensor) -> torch.Tensor:
-    # Zeros_like calls torch.full which is currently cpu fallback
-    # This causes issues in tests that use fake device propagation
-    zero = torch.zeros_like(input)
+    # Currently falling back to torch.zeros_like for dtypes other than bool
+    # This is needed until scalar False/0.0 or constant tensor [False]/[0.0] is supported
+    if input.dtype is torch.bool:
+        zero = torch.ne(input, input)
+    else:
+        zero = torch.zeros_like(input)
     return torch.eq(input, zero)
 
