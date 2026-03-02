@@ -20,6 +20,8 @@ from collections import Counter
 import torch
 import sympy
 
+from torch_spyre._C import compute_view_layout
+
 from torch._inductor.codegen.common import (
     CSEVariable,
     IndentedBuffer,
@@ -40,7 +42,8 @@ from .constants import (
 )
 from .errors import Unsupported
 from .ir import FixedTiledLayout
-from .pass_utils import map_dims_to_vars
+from .pass_utils import map_dims_to_vars, wildcard_symbol
+from .stickify import is_sparse
 
 
 class RValue(ABC):
@@ -54,6 +57,26 @@ class TensorAccess(RValue):
     name: str
     index: sympy.Expr
     layout: FixedTiledLayout
+
+    def unsqueeze_if_sparse(self):
+        """
+        If layout is sparse, construct a new layout that unsqueezes to a dense tensor
+        """
+
+        if is_sparse(self.layout.device_layout):
+            new_size = self.layout.size + [1]
+            new_stride = self.layout.stride + [1]
+            new_stl = compute_view_layout(
+                torch.Size(self.layout.size),
+                torch.Size(new_size),
+                self.layout.device_layout,
+            )
+            new_layout = FixedTiledLayout(
+                self.layout.device, self.layout.dtype, new_size, new_stride, new_stl
+            )
+            return TensorAccess(self.name, self.index, new_layout)
+
+        return self
 
 
 @dataclass
@@ -332,7 +355,6 @@ def create_kernel_spec(
 
 class SpyreKernel(SIMDKernel[CSEVariable]):
     overrides = SpyreOpFuncs  # type: ignore[assignment]
-    wildcard = sympy.Symbol("*")
 
     def __init__(
         self,
@@ -357,7 +379,7 @@ class SpyreKernel(SIMDKernel[CSEVariable]):
         if not isinstance(layout, FixedTiledLayout):
             raise Unsupported(f"{name} does not have FixedTiledLayout")
         index = sympy_subs(index, V.graph.sizevars.precomputed_replacements)
-        return TensorAccess(name, index, layout)
+        return TensorAccess(name, index, layout).unsqueeze_if_sparse()
 
     def store(
         self,
@@ -372,15 +394,15 @@ class SpyreKernel(SIMDKernel[CSEVariable]):
         if not isinstance(layout, FixedTiledLayout):
             raise Unsupported(f"{name} does not have FixedTiledLayout")
         index = sympy_subs(index, V.graph.sizevars.precomputed_replacements)
-        dst = TensorAccess(name, index, layout)
+        dst = TensorAccess(name, index, layout).unsqueeze_if_sparse()
         actuals = self.args.python_argdefs()[1]
         real_dst_name = V.graph.scheduler.mutation_real_name.get(name, name)
         if real_dst_name != name:
             # Skip allocating an output buffer; this name is an alias to another buffer
             V.graph.removed_buffers.add(name)
         op_info = {}
-        if hasattr(self.current_node, "spyre_core_division"):
-            op_info["core_division"] = self.current_node.spyre_core_division  # type: ignore[union-attr]
+        if hasattr(self.current_node, "op_dim_splits"):
+            op_info["op_dim_splits"] = self.current_node.op_dim_splits  # type: ignore[union-attr]
         if hasattr(self.current_node, "n_cores_used"):
             op_info["n_cores_used"] = self.current_node.n_cores_used  # type: ignore[union-attr]
 
@@ -480,6 +502,14 @@ class SpyreKernel(SIMDKernel[CSEVariable]):
                 ks.op_info["transposed_dims"] = [
                     d for d in range(len(in_di)) if in_di[d].var != out_di[d].var
                 ]
+                # Reorder scale of the output  to implement transpositions
+                (
+                    ks.scales[-1][ks.op_info["transposed_dims"][0]],
+                    ks.scales[-1][ks.op_info["transposed_dims"][1]],
+                ) = (
+                    ks.scales[-1][ks.op_info["transposed_dims"][1]],
+                    ks.scales[-1][ks.op_info["transposed_dims"][0]],
+                )
 
             # TODO(aviros): Remove this piece of code when real relayout is implemented
             if generic_relayout:
@@ -513,8 +543,8 @@ class SpyreKernel(SIMDKernel[CSEVariable]):
         op_info = {}
         if hasattr(self.current_node.node.data, "op_info"):  # type: ignore[union-attr]
             op_info.update(self.current_node.node.data.op_info)  # type: ignore[union-attr]
-        if hasattr(self.current_node, "spyre_core_division"):
-            op_info["core_division"] = self.current_node.spyre_core_division  # type: ignore[union-attr]
+        if hasattr(self.current_node, "op_dim_splits"):
+            op_info["op_dim_splits"] = self.current_node.op_dim_splits  # type: ignore[union-attr]
         if hasattr(self.current_node, "n_cores_used"):
             op_info["n_cores_used"] = self.current_node.n_cores_used  # type: ignore[union-attr]
 
@@ -533,12 +563,12 @@ class SpyreKernel(SIMDKernel[CSEVariable]):
             if len(di_x) == 2 and len(di_y) == 2:
                 di = [di_x[0], di_x[1], di_y[1]]
             elif len(di_x) == 1 and len(di_y) == 2:
-                di = [di_x[0], DimensionInfo(self.wildcard, 1), di_y[1]]
+                di = [di_x[0], DimensionInfo(wildcard_symbol(1), 1), di_y[1]]
                 # TODO:  The KernelSpec we generate is correct, but the SDSC we generate
                 # will not compute the correct result.  Raise Unsupported to make this explicit.
                 raise Unsupported(f"matmul requires padding support: {value.arguments}")
             elif len(di_x) == 2 and len(di_y) == 1:
-                di = [di_x[0], di_x[1], DimensionInfo(self.wildcard, 1)]
+                di = [di_x[0], di_x[1], DimensionInfo(wildcard_symbol(1), 1)]
                 # TODO:  The KernelSpec we generate is correct, but the SDSC we generate
                 # will not compute the correct result.  Raise Unsupported to make this explicit.
                 raise Unsupported(f"matmul requires padding support: {value.arguments}")
@@ -574,25 +604,55 @@ class SpyreKernel(SIMDKernel[CSEVariable]):
                 di = di_x[0:3] + di_y[2:]
             elif len(di_x) == 2 and len(di_y) == 3:
                 if di_x == di_y[0:2]:
-                    di = [di_x[0], DimensionInfo(self.wildcard, 1), di_x[1], di_y[2]]
+                    di = [
+                        di_x[0],
+                        DimensionInfo(wildcard_symbol(1), 1),
+                        di_x[1],
+                        di_y[2],
+                    ]
                 elif di_x[0] == di_y[0]:
-                    di = [di_x[0], di_x[1], DimensionInfo(self.wildcard, 1), di_y[2]]
+                    di = [
+                        di_x[0],
+                        di_x[1],
+                        DimensionInfo(wildcard_symbol(1), 1),
+                        di_y[2],
+                    ]
                 else:
-                    di = [DimensionInfo(self.wildcard, 1), di_x[0], di_x[1], di_y[2]]
+                    di = [
+                        DimensionInfo(wildcard_symbol(1), 1),
+                        di_x[0],
+                        di_x[1],
+                        di_y[2],
+                    ]
             elif len(di_x) == 3 and len(di_y) == 2:
-                di = [di_x[0], di_x[1], di_x[2], DimensionInfo(self.wildcard, 1)]
+                if di_x[:2] == di_y:
+                    di = [di_x[0], di_x[1], di_x[2], DimensionInfo(self.wildcard, 1)]
+                elif di_x[2] == di_y[0]:
+                    di = [di_x[0], di_x[1], di_x[2], di_y[1]]
+                else:
+                    raise Unsupported(f"malformed bmm {di_x} {di_y}")
             elif len(di_x) == 2 and len(di_y) == 2:
                 if di_x == di_y:
                     di = [
                         di_x[0],
-                        DimensionInfo(self.wildcard, 1),
+                        DimensionInfo(wildcard_symbol(1), 1),
                         di_x[1],
-                        DimensionInfo(self.wildcard, 1),
+                        DimensionInfo(wildcard_symbol(2), 1),
                     ]
                 elif di_x[0] == di_y[0]:
-                    di = [di_x[0], di_x[1], DimensionInfo(self.wildcard, 1), di_y[1]]
+                    di = [
+                        di_x[0],
+                        di_x[1],
+                        DimensionInfo(wildcard_symbol(1), 1),
+                        di_y[1],
+                    ]
                 else:
-                    di = [DimensionInfo(self.wildcard, 1), di_x[0], di_x[1], di_y[1]]
+                    di = [
+                        DimensionInfo(wildcard_symbol(1), 1),
+                        di_x[0],
+                        di_x[1],
+                        di_y[1],
+                    ]
             else:
                 raise Unsupported(f"malformed bmm {di_x} {di_y}")
             args = [
@@ -643,12 +703,7 @@ class SpyreKernel(SIMDKernel[CSEVariable]):
         if len(op_dimensions) == 1 and op_dimensions[0].numel == 1:
             return [access.layout.device_layout.dim_map[0]]
 
-        return [
-            -3
-            if (di.var == self.wildcard)
-            else (var_map[di.var] if di.var in var_map else -1)
-            for di in op_dimensions
-        ]
+        return [var_map[di.var] if di.var in var_map else -1 for di in op_dimensions]
 
     def derive_dim_info(self, access: TensorAccess) -> list[DimensionInfo]:
         """
@@ -658,11 +713,11 @@ class SpyreKernel(SIMDKernel[CSEVariable]):
         if var_ranges:
             dim_map = map_dims_to_vars(access.layout, access.index)
             return [
-                DimensionInfo(dim_map[v], int(var_ranges[dim_map[v]]))
+                DimensionInfo(dim_map[v], int(var_ranges.get(dim_map[v], 1)))
                 for v in sorted(dim_map)
             ]
         else:
-            return [DimensionInfo(self.wildcard, 1)]
+            return [DimensionInfo(wildcard_symbol(0), 1)]
 
     def codegen_kernel(self):
         """Codegen the body of this kernel by pretty printing its KernelSpec"""
