@@ -647,7 +647,7 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
         },
         (
             "test_logical_not",
-            "test_unary_op_cpu",
+            "test_fallback_unary_op_cpu",
         ): {
             "ops_dict": {
                 "logical_not": torch.logical_not,
@@ -890,6 +890,10 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
         torch.testing.assert_close(result, torch.eq(x, y))
 
     def test_unary_op_cpu(self, op, x):
+        compare_with_cpu(op, x)
+
+    @pytest.mark.filterwarnings("ignore::torch_spyre.fallbacks.FallbackWarning")
+    def test_fallback_unary_op_cpu(self, op, x):
         compare_with_cpu(op, x)
 
     def test_binary_op(self, op, a, b):
