@@ -296,7 +296,7 @@ class TestOps(TestCase):
         z = (x_spyre + y).to("cpu")
         torch.testing.assert_close(z, x + y, rtol=self.rtol, atol=self.atol)
 
-    @unittest.skip("xfail: Swapping stick dimension is unsupported in new DCI")
+    @unittest.skip("xfail: contiguous crashes in eager mode")
     def test_add_Tensor_transpose(self):
         x = torch.arange(8, dtype=self.dtype).view(2, 4)
         y = torch.arange(8, dtype=self.dtype).view(4, 2) * 10
@@ -526,9 +526,11 @@ class TestOps(TestCase):
             z, torch.matmul(x, y), rtol=self.rtol, atol=self.atol
         )
 
-    @unittest.skip("TODO: mean.out not implemented in eager mode")
     def test_mean(self):
-        x = torch.tensor([[[1, 2, 3], [4, 5, 6]]], dtype=self.dtype)
+        x = torch.tensor(
+            [[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], [[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]]],
+            dtype=self.dtype,
+        )
         x_spyre = x.to("spyre")
         y0 = torch.mean(x_spyre, dim=[0]).to("cpu")
         y1 = torch.mean(x_spyre, dim=[1]).to("cpu")
